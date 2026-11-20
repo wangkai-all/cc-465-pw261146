@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>湖表分区治理 · lakegov</title>
+<style>
+  /* ---- 设计令牌（参考调色板，明暗双主题） ---- */
+  :root {
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --gridline: #e1e0d9; --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --hot: #2a78d6; --cold: #eb6834;            /* 分类色：槽1蓝 / 槽2橙 */
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --good-ink: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7;
+      --muted: #898781; --gridline: #2c2c2a; --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --hot: #3987e5; --cold: #d95926;
+      --good-ink: #0ca30c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 16px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface); position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--ink-2); }
+  header .spacer { flex: 1; }
+  main { padding: 16px 24px 64px; max-width: 1280px; margin: 0 auto; }
+  section {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; margin-bottom: 16px;
+  }
+  section h2 { font-size: 14px; margin: 0 0 12px; color: var(--ink-2);
+    font-weight: 600; letter-spacing: .02em; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; }
+  .kpi { background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; }
+  .kpi .label { color: var(--ink-2); font-size: 12px; }
+  .kpi .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+  .kpi .value.bad { color: var(--critical); }
+  .charts { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; }
+  @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--gridline); }
+  th { color: var(--ink-2); font-weight: 600; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr.clickable { cursor: pointer; }
+  tbody tr.clickable:hover { background: var(--page); }
+  tbody tr.selected { outline: 2px solid var(--hot); outline-offset: -2px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 12px; border: 1px solid var(--border); color: var(--ink-2); }
+  .badge.hot { border-color: var(--hot); }
+  .badge.cold { border-color: var(--cold); }
+  .badge.warn { border-color: var(--serious); color: var(--ink); }
+  .badge.bad { border-color: var(--critical); color: var(--critical); }
+  .status { display: inline-flex; align-items: center; gap: 6px; }
+  .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); }
+  .status.COMMITTED::before { background: var(--good); }
+  .status.RUNNING::before { background: var(--warning); }
+  .status.RETRYING::before { background: var(--serious); }
+  .status.FAILED::before { background: var(--critical); }
+  .status.PLANNED::before { background: var(--muted); }
+  button {
+    font: inherit; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  button:hover { background: var(--page); }
+  button.primary { background: var(--hot); border-color: var(--hot); color: #fff; }
+  button.danger { border-color: var(--critical); color: var(--critical); }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select {
+    font: inherit; padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  label { color: var(--ink-2); font-size: 13px; display: inline-flex;
+    align-items: center; gap: 4px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .ok { color: var(--good-ink); font-weight: 600; }
+  .fail { color: var(--critical); font-weight: 600; }
+  pre {
+    background: var(--page); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; overflow: auto; font-size: 12px; max-height: 320px;
+  }
+  #tooltip {
+    position: fixed; pointer-events: none; z-index: 99; display: none;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-size: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 280px;
+  }
+  #tooltip .tval { font-weight: 600; font-size: 14px; }
+  #tooltip .trow { display: flex; align-items: center; gap: 6px; }
+  #tooltip .key { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--ink-2);
+    margin-bottom: 8px; }
+  .legend .item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .sw { width: 10px; height: 10px; border-radius: 2px; }
+  .fading { opacity: .55; transition: opacity .2s; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>湖表分区治理</h1>
+  <span class="sub">表 <b id="tblName">events</b> · 当前快照 <b id="snapNow">-</b></span>
+  <span class="spacer"></span>
+  <label>天数 <input id="simDays" type="number" value="14" min="7" max="30" style="width:60px"></label>
+  <label>损坏率 <input id="simCorrupt" type="number" value="5" min="0" max="30" style="width:56px"> %</label>
+  <button id="btnSimulate">重新模拟数据</button>
+</header>
+<main>
+  <!-- KPI -->
+  <div class="kpis" id="kpis"></div>
+
+  <!-- 图表 -->
+  <div style="height:16px"></div>
+  <div class="charts">
+    <section>
+      <h2>分区大小分布（按层着色，▲ = 倾斜分区）</h2>
+      <div class="legend">
+        <span class="item"><span class="sw" style="background:var(--hot)"></span>HOT 层</span>
+        <span class="item"><span class="sw" style="background:var(--cold)"></span>COLD 层</span>
+      </div>
+      <div class="scroll"><div id="chartParts"></div></div>
+    </section>
+    <section>
+      <h2>文件大小直方图（竖线 = 小文件阈值）</h2>
+      <div class="scroll"><div id="chartHist"></div></div>
+      <details class="small muted"><summary>桶数据表</summary>
+        <table id="histTable"><thead><tr><th>桶起点</th><th class="num">文件数</th></tr></thead><tbody></tbody></table>
+      </details>
+    </section>
+  </div>
+
+  <!-- 分区表 -->
+  <section>
+    <h2>分区明细（点击行生成治理计划）</h2>
+    <div class="scroll"><table id="partTable">
+      <thead><tr>
+        <th>分区</th><th>层</th><th class="num">大小</th><th class="num">文件数</th>
+        <th class="num">平均文件</th><th class="num">小文件占比</th><th class="num">键重叠度</th>
+        <th class="num">倾斜度</th><th class="num">查询热度</th><th class="num">损坏</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <div class="grid2">
+    <!-- 查询面板 -->
+    <section>
+      <h2>查询模拟（分区裁剪 + 文件 min/max 裁剪）</h2>
+      <div class="row">
+        <label>分区起 <input id="qPartStart" type="date"></label>
+        <label>分区止 <input id="qPartEnd" type="date"></label>
+        <label>键下限 <input id="qKeyMin" type="number" placeholder="-" style="width:80px"></label>
+        <label>键上限 <input id="qKeyMax" type="number" placeholder="-" style="width:80px"></label>
+        <label><input id="qStrict" type="checkbox"> 严格模式(遇损坏即失败)</label>
+        <button class="primary" id="btnQuery">执行查询</button>
+      </div>
+      <div id="queryResult" style="margin-top:12px"></div>
+      <h2 style="margin-top:16px">最近查询</h2>
+      <div class="scroll"><table id="queryTable">
+        <thead><tr><th>时间</th><th>分区范围</th><th class="num">分区命中/裁剪</th>
+          <th class="num">文件命中/裁剪</th><th class="num">扫描</th><th class="num">行数</th>
+          <th class="num">耗时ms</th><th class="num">快照</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+
+    <!-- 治理面板 -->
+    <section>
+      <h2>治理计划与合并</h2>
+      <div id="planBox" class="muted">点击上方分区行以生成计划。</div>
+      <div class="row" style="margin-top:10px">
+        <label>故障注入
+          <select id="failAt">
+            <option value="">无</option><option value="read">read</option>
+            <option value="write">write</option><option value="commit">commit</option>
+          </select></label>
+        <label>失败次数 <input id="failAttempts" type="number" value="1" min="1" max="3" style="width:56px"></label>
+        <button class="primary" id="btnMerge" disabled>执行合并</button>
+        <button id="btnCorrupt">注入损坏</button>
+        <button id="btnGc">GC 清理</button>
+      </div>
+      <div id="gcResult" class="small muted" style="margin-top:6px"></div>
+      <h2 style="margin-top:16px">合并任务</h2>
+      <div class="scroll"><table id="jobTable">
+        <thead><tr><th>任务</th><th>分区</th><th>策略</th><th>状态</th>
+          <th class="num">尝试</th><th class="num">快照 前→后</th><th>详情</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+  </div>
+
+  <!-- 验证面板 -->
+  <section>
+    <h2>一致性验证</h2>
+    <div class="row">
+      <button class="primary" id="btnVerifyConcurrent">验证并发查询（合并进行中多读）</button>
+      <button class="primary" id="btnVerifyRetry">验证故障重试（commit 注入失败）</button>
+      <span class="small muted">并发验证会在合并运行期间并发执行 8 路查询，检查每一路都读到一致快照</span>
+    </div>
+    <div id="verifyResult" style="margin-top:12px"></div>
+  </section>
+
+  <!-- 快照时间线 -->
+  <section>
+    <h2>快照时间线</h2>
+    <div class="scroll"><table id="snapTable">
+      <thead><tr><th class="num">版本</th><th>类型</th><th>说明</th><th>时间</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+</main>
+<div id="tooltip"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const SVGNS = "http://www.w3.org/2000/svg";
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+let OVERVIEW = null, SELECTED_PART = null, PLAN = null;
+
+const fmtBytes = (n) => {
+  if (n == null) return "-";
+  if (n < 1024) return n + "B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + "K";
+  return (n / 1024 / 1024).toFixed(2) + "M";
+};
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+
+async function api(path, body) {
+  const opt = body === undefined ? {} :
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j;
+}
+
+/* ---------- tooltip（hover/focus 同一层） ---------- */
+const tip = $("tooltip");
+function showTip(evt, rows) {
+  tip.textContent = "";
+  rows.forEach(([label, value, color]) => {
+    const div = document.createElement("div");
+    div.className = "trow";
+    if (color) { const k = document.createElement("span"); k.className = "key";
+      k.style.background = color; div.appendChild(k); }
+    const v = document.createElement("span"); v.className = "tval"; v.textContent = value;
+    const l = document.createElement("span"); l.textContent = " " + label;
+    div.appendChild(v); div.appendChild(l); tip.appendChild(div);
+  });
+  tip.style.display = "block";
+  moveTip(evt);
+}
+function moveTip(evt) {
+  const x = (evt.clientX ?? 0) + 14, y = (evt.clientY ?? 0) + 14;
+  tip.style.left = Math.min(x, innerWidth - 300) + "px";
+  tip.style.top = Math.min(y, innerHeight - 120) + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+function bindTip(el, rowsFn) {
+  el.addEventListener("pointermove", (e) => { showTip(e, rowsFn()); });
+  el.addEventListener("pointerleave", hideTip);
+  el.addEventListener("focus", (e) => {
+    const r = el.getBoundingClientRect();
+    showTip({ clientX: r.left, clientY: r.top }, rowsFn());
+  });
+  el.addEventListener("blur", hideTip);
+}
+
+/* ---------- KPI ---------- */
+function renderKpis(k) {
+  const tiles = [
+    ["分区数", k.partitions, false],
+    ["文件总数", k.files, false],
+    ["总大小", fmtBytes(k.total_bytes), false],
+    ["小文件占比", (k.small_ratio * 100).toFixed(1) + "%", k.small_ratio > 0.3],
+    ["损坏文件", k.corrupt_files, k.corrupt_files > 0],
+    ["倾斜分区", k.skewed_parts, k.skewed_parts > 0],
+  ];
+  const box = $("kpis"); box.textContent = "";
+  tiles.forEach(([label, value, bad]) => {
+    const d = document.createElement("div"); d.className = "kpi";
+    const l = document.createElement("div"); l.className = "label"; l.textContent = label;
+    const v = document.createElement("div"); v.className = "value" + (bad ? " bad" : "");
+    v.textContent = value;
+    d.appendChild(l); d.appendChild(v); box.appendChild(d);
+  });
+}
+
+/* ---------- 分区大小柱状图 ---------- */
+function renderPartChart(parts) {
+  const W = Math.max(560, parts.length * 44), H = 240, PAD = { l: 56, r: 8, t: 18, b: 34 };
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("width", W); svg.setAttribute("height", H);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "各分区大小柱状图");
+  const max = Math.max(1, ...parts.map(p => p.total_bytes));
+  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
+  const slot = iw / Math.max(1, parts.length);
+  const barW = Math.min(24, slot - 2);          // 柱宽 ≤24px，槽内留 2px 表面间隙
+  // 网格线 + Y 轴刻度（整洁数值）
+  const steps = 4;
+  for (let i = 0; i <= steps; i++) {
+    const y = PAD.t + ih - (ih * i / steps);
+    const line = document.createElementNS(SVGNS, "line");
+    line.setAttribute("x1", PAD.l); line.setAttribute("x2", W - PAD.r);
+    line.setAttribute("y1", y); line.setAttribute("y2", y);
+    line.setAttribute("stroke", css("--gridline")); line.setAttribute("stroke-width", "1");
+    svg.appendChild(line);
+    const t = document.createElementNS(SVGNS, "text");
+    t.setAttribute("x", PAD.l - 6); t.setAttribute("y", y + 4);
+    t.setAttribute("text-anchor", "end"); t.setAttribute("font-size", "11");
+    t.setAttribute("fill", css("--muted"));
+    t.textContent = fmtBytes(Math.round(max * i / steps));
+    svg.appendChild(t);
+  }
+  // 基线
+  const base = document.createElementNS(SVGNS, "line");
+  base.setAttribute("x1", PAD.l); base.setAttribute("x2", W - PAD.r);
+  base.setAttribute("y1", PAD.t + ih); base.setAttribute("y2", PAD.t + ih);
+  base.setAttribute("stroke", css("--baseline")); base.setAttribute("stroke-width", "1");
+  svg.appendChild(base);
+
+  let maxIdx = 0;
+  parts.forEach((p, i) => { if (p.total_bytes > parts[maxIdx].total_bytes) maxIdx = i; });
+  parts.forEach((p, i) => {
+    const h = Math.max(2, ih * p.total_bytes / max);
+    const x = PAD.l + i * slot + (slot - barW) / 2, y = PAD.t + ih - h;
+    const color = p.tier === "HOT" ? css("--hot") : css("--cold");
+    // 透明命中区（整个槽列，比柱本身大）
+    const hit = document.createElementNS(SVGNS, "rect");
+    hit.setAttribute("x", PAD.l + i * slot); hit.setAttribute("y", PAD.t);
+    hit.setAttribute("width", slot); hit.setAttribute("height", ih);
+    hit.setAttribute("fill", "transparent"); hit.setAttribute("tabindex", "0");
+    const bar = document.createElementNS(SVGNS, "rect");
+    bar.setAttribute("x", x); bar.setAttribute("y", y);
+    bar.setAttribute("width", barW); bar.setAttribute("height", h);
+    bar.setAttribute("fill", color);
+    bar.setAttribute("rx", "4"); bar.setAttribute("ry", "4");
+    // 基线端保持直角：用一个同色的方形补丁盖住底部圆角
+    const sq = document.createElementNS(SVGNS, "rect");
+    sq.setAttribute("x", x); sq.setAttribute("y", y + h - 4);
+    sq.setAttribute("width", barW); sq.setAttribute("height", "4");
+    sq.setAttribute("fill", color);
+    svg.appendChild(bar); svg.appendChild(sq); svg.appendChild(hit);
+    bindTip(hit, () => [
+      [p.part_key, fmtBytes(p.total_bytes), color],
+      ["文件", p.file_count + " 个", null],
+      ["层 / 倾斜", p.tier + " / " + p.skew_factor + "x", null],
+      ["小文件占比", (p.small_ratio * 100).toFixed(0) + "%", null],
+    ]);
+    hit.addEventListener("click", () => selectPartition(p.part_key));
+    // 倾斜标记
+    if (p.skew_factor >= 3) {
+      const m = document.createElementNS(SVGNS, "text");
+      m.setAttribute("x", x + barW / 2); m.setAttribute("y", y - 6);
+      m.setAttribute("text-anchor", "middle"); m.setAttribute("font-size", "11");
+      m.setAttribute("fill", css("--ink-2")); m.textContent = "▲";
+      svg.appendChild(m);
+    }
+    // 仅标注最大值柱（选择性标注）
+    if (i === maxIdx) {
+      const t = document.createElementNS(SVGNS, "text");
+      t.setAttribute("x", x + barW / 2); t.setAttribute("y", y - (p.skew_factor >= 3 ? 18 : 6));
+      t.setAttribute("text-anchor", "middle"); t.setAttribute("font-size", "11");
+      t.setAttribute("fill", css("--ink-2")); t.textContent = fmtBytes(p.total_bytes);
+      svg.appendChild(t);
+    }
+    // X 轴日期标签（隔一个显示）
+    if (i % 2 === 0) {
+      const t = document.createElementNS(SVGNS, "text");
+      t.setAttribute("x", PAD.l + i * slot + slot / 2); t.setAttribute("y", H - 12);
+      t.setAttribute("text-anchor", "middle"); t.setAttribute("font-size", "10");
+      t.setAttribute("fill", css("--muted"));
+      t.textContent = p.part_key.slice(5);
+      svg.appendChild(t);
+    }
+  });
+  const box = $("chartParts"); box.textContent = ""; box.appendChild(svg);
+}
+
+/* ---------- 文件大小直方图 ---------- */
+function renderHistogram(hist) {
+  const buckets = hist.buckets || [];
+  const W = 420, H = 220, PAD = { l: 44, r: 8, t: 14, b: 34 };
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("width", W); svg.setAttribute("height", H);
+  svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "文件大小直方图");
+  const max = Math.max(1, ...buckets.map(b => b.count));
+  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
+  const slot = iw / Math.max(1, buckets.length);
+  const barW = Math.min(24, slot - 2);
+  for (let i = 0; i <= 3; i++) {
+    const y = PAD.t + ih - ih * i / 3;
+    const line = document.createElementNS(SVGNS, "line");
+    line.setAttribute("x1", PAD.l); line.setAttribute("x2", W - PAD.r);
+    line.setAttribute("y1", y); line.setAttribute("y2", y);
+    line.setAttribute("stroke", css("--gridline"));
+    svg.appendChild(line);
+    const t = document.createElementNS(SVGNS, "text");
+    t.setAttribute("x", PAD.l - 6); t.setAttribute("y", y + 4);
+    t.setAttribute("text-anchor", "end"); t.setAttribute("font-size", "11");
+    t.setAttribute("fill", css("--muted")); t.textContent = Math.round(max * i / 3);
+    svg.appendChild(t);
+  }
+  const base = document.createElementNS(SVGNS, "line");
+  base.setAttribute("x1", PAD.l); base.setAttribute("x2", W - PAD.r);
+  base.setAttribute("y1", PAD.t + ih); base.setAttribute("y2", PAD.t + ih);
+  base.setAttribute("stroke", css("--baseline"));
+  svg.appendChild(base);
+  buckets.forEach((b, i) => {
+    const h = Math.max(2, ih * b.count / max);
+    const x = PAD.l + i * slot + (slot - barW) / 2, y = PAD.t + ih - h;
+    const hit = document.createElementNS(SVGNS, "rect");
+    hit.setAttribute("x", PAD.l + i * slot); hit.setAttribute("y", PAD.t);
+    hit.setAttribute("width", slot); hit.setAttribute("height", ih);
+    hit.setAttribute("fill", "transparent"); hit.setAttribute("tabindex", "0");
+    const bar = document.createElementNS(SVGNS, "rect");
+    bar.setAttribute("x", x); bar.setAttribute("y", y);
+    bar.setAttribute("width", barW); bar.setAttribute("height", h);
+    bar.setAttribute("fill", css("--hot")); bar.setAttribute("rx", "4");
+    const sq = document.createElementNS(SVGNS, "rect");
+    sq.setAttribute("x", x); sq.setAttribute("y", y + h - 4);
+    sq.setAttribute("width", barW); sq.setAttribute("height", "4");
+    sq.setAttribute("fill", css("--hot"));
+    svg.appendChild(bar); svg.appendChild(sq); svg.appendChild(hit);
+    bindTip(hit, () => [["桶 " + b.label, b.count + " 个文件", css("--hot")]]);
+    if (i % 3 === 0) {
+      const t = document.createElementNS(SVGNS, "text");
+      t.setAttribute("x", PAD.l + i * slot + slot / 2); t.setAttribute("y", H - 12);
+      t.setAttribute("text-anchor", "middle"); t.setAttribute("font-size", "10");
+      t.setAttribute("fill", css("--muted")); t.textContent = b.label;
+      svg.appendChild(t);
+    }
+  });
+  // 小文件阈值竖线
+  if (hist.small_threshold != null && buckets.length) {
+    const lo = 0; // 桶标签从最小文件起
+    const step = buckets.length > 1 ?
+      (parseInt(buckets[1].label) - parseInt(buckets[0].label)) : 1;
+    const idx = (hist.small_threshold / 1024 - parseInt(buckets[0].label)) / (step || 1);
+    if (idx >= 0 && idx <= buckets.length) {
+      const x = PAD.l + idx * slot;
+      const line = document.createElementNS(SVGNS, "line");
+      line.setAttribute("x1", x); line.setAttribute("x2", x);
+      line.setAttribute("y1", PAD.t); line.setAttribute("y2", PAD.t + ih);
+      line.setAttribute("stroke", css("--ink-2")); line.setAttribute("stroke-width", "1.5");
+      svg.appendChild(line);
+      const t = document.createElementNS(SVGNS, "text");
+      t.setAttribute("x", x + 4); t.setAttribute("y", PAD.t + 10);
+      t.setAttribute("font-size", "10"); t.setAttribute("fill", css("--ink-2"));
+      t.textContent = "小文件阈值 " + fmtBytes(hist.small_threshold);
+      svg.appendChild(t);
+    }
+  }
+  const box = $("chartHist"); box.textContent = ""; box.appendChild(svg);
+  const tb = $("histTable").querySelector("tbody"); tb.textContent = "";
+  buckets.forEach(b => {
+    const tr = document.createElement("tr");
+    [b.label, b.count].forEach((v, i) => {
+      const td = document.createElement("td");
+      if (i === 1) td.className = "num";
+      td.textContent = v; tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+
+/* ---------- 分区表 ---------- */
+function renderPartTable(parts) {
+  const tb = $("partTable").querySelector("tbody"); tb.textContent = "";
+  const td = (v, num) => {
+    const el = document.createElement("td");
+    if (num) el.className = "num";
+    el.textContent = v;
+    return el;
+  };
+  const badgeTd = (text, cls) => {
+    const el = document.createElement("td");
+    const b = document.createElement("span");
+    b.className = "badge " + cls; b.textContent = text;
+    el.appendChild(b);
+    return el;
+  };
+  parts.forEach(p => {
+    const tr = document.createElement("tr");
+    tr.className = "clickable" + (p.part_key === SELECTED_PART ? " selected" : "");
+    tr.appendChild(td(p.part_key));
+    tr.appendChild(badgeTd(p.tier, p.tier.toLowerCase()));
+    tr.appendChild(td(fmtBytes(p.total_bytes), true));
+    tr.appendChild(td(p.file_count, true));
+    tr.appendChild(td(fmtBytes(p.avg_bytes), true));
+    tr.appendChild(td((p.small_ratio * 100).toFixed(0) + "%", true));
+    tr.appendChild(td((p.overlap_ratio * 100).toFixed(0) + "%", true));
+    tr.appendChild(p.skew_factor >= 3
+      ? badgeTd("▲ " + p.skew_factor + "x", "warn")
+      : td(p.skew_factor + "x", true));
+    tr.appendChild(td(p.heat_queries, true));
+    tr.appendChild(p.corrupt_files > 0
+      ? badgeTd("✗ " + p.corrupt_files, "bad")
+      : td("0", true));
+    tr.addEventListener("click", () => selectPartition(p.part_key));
+    tb.appendChild(tr);
+  });
+}
+
+/* ---------- 治理计划 ---------- */
+async function selectPartition(pk) {
+  SELECTED_PART = pk;
+  renderPartTable(OVERVIEW.partitions);
+  const j = await api("/api/plan?part_key=" + encodeURIComponent(pk));
+  PLAN = j;
+  const box = $("planBox"); box.textContent = "";
+  if (j.error) { box.textContent = j.error; return; }
+  const { plan, cost, stats } = j;
+  const head = document.createElement("div");
+  head.innerHTML = `<b>${plan.part_key}</b> → 策略 <b>${plan.strategy}</b>` +
+    (plan.repair ? ' <span class="badge bad">+ REPAIR</span>' : "");
+  box.appendChild(head);
+  const ul = document.createElement("ul"); ul.className = "small";
+  plan.reasons.forEach(r => { const li = document.createElement("li"); li.textContent = r; ul.appendChild(li); });
+  box.appendChild(ul);
+  if (plan.strategy !== "NO_OP") {
+    const tbl = document.createElement("table");
+    tbl.innerHTML = `<thead><tr><th>成本估计</th><th class="num">值</th></tr></thead>`;
+    const tb = document.createElement("tbody");
+    [
+      ["读取 / 写入", fmtBytes(cost.read_bytes) + " / " + fmtBytes(cost.write_bytes)],
+      ["文件数", cost.files_in + " → " + cost.files_out + "（-" + cost.files_reduced + "）"],
+      ["预计耗时", cost.est_duration_ms + " ms"],
+      ["键重叠度", (cost.overlap_ratio_before * 100).toFixed(0) + "% → " +
+        (cost.overlap_ratio_after * 100).toFixed(0) + "%"],
+      ["损坏输入", cost.corrupt_inputs],
+    ].forEach(([k, v]) => {
+      const tr = document.createElement("tr");
+      const a = document.createElement("td"); a.textContent = k;
+      const b = document.createElement("td"); b.className = "num"; b.textContent = v;
+      tr.appendChild(a); tr.appendChild(b); tb.appendChild(tr);
+    });
+    tbl.appendChild(tb); box.appendChild(tbl);
+    $("btnMerge").disabled = false;
+  } else {
+    $("btnMerge").disabled = true;
+  }
+}
+
+/* ---------- 任务表 ---------- */
+function renderJobs(jobs) {
+  const tb = $("jobTable").querySelector("tbody"); tb.textContent = "";
+  jobs.forEach(j => {
+    const tr = document.createElement("tr");
+    const hist = JSON.parse(j.history || "[]");
+    const lastErr = j.error ? ` title="${j.error.replace(/"/g, "'")}"` : "";
+    tr.innerHTML =
+      `<td class="small">${j.id.slice(0, 6)}</td><td>${j.part_key}</td>` +
+      `<td>${j.strategy}${j.repair ? "+R" : ""}</td>` +
+      `<td><span class="status ${j.status}">${j.status}</span></td>` +
+      `<td class="num">${j.attempts}/${j.max_attempts}</td>` +
+      `<td class="num">${j.snapshot_before ?? "-"} → ${j.snapshot_after ?? "-"}</td>` +
+      `<td class="small muted"${lastErr}>${hist.map(h => "第" + h.attempt + "次:" + h.result).join("；")}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+/* ---------- 快照 / 查询表 ---------- */
+function renderSnapshots(snaps) {
+  const tb = $("snapTable").querySelector("tbody"); tb.textContent = "";
+  snaps.forEach(s => {
+    const tr = document.createElement("tr");
+    [s.id, s.kind, s.detail || "", fmtTime(s.created_at)].forEach((v, i) => {
+      const td = document.createElement("td");
+      if (i === 0) td.className = "num";
+      td.textContent = v; tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+function renderQueries(queries) {
+  const tb = $("queryTable").querySelector("tbody"); tb.textContent = "";
+  queries.forEach(q => {
+    const tr = document.createElement("tr");
+    const range = (q.part_start || "…") + " ~ " + (q.part_end || "…");
+    [[fmtTime(q.created_at), ""], [range, ""],
+     [`${q.partitions_hit} / ${q.partitions_pruned}`, "num"],
+     [`${q.files_hit} / ${q.files_pruned}`, "num"],
+     [fmtBytes(q.bytes_scanned), "num"], [q.rows_returned, "num"],
+     [q.duration_ms, "num"], [q.snapshot, "num"]].forEach(([v, cls]) => {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      td.textContent = v; tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+
+/* ---------- 总览刷新（保持帧：刷新期间降低透明度，不闪骨架屏） ---------- */
+async function refresh() {
+  const main = document.querySelector("main");
+  main.classList.add("fading");
+  try {
+    const [ov, hist] = await Promise.all([api("/api/overview"), api("/api/histogram")]);
+    OVERVIEW = ov;
+    $("snapNow").textContent = "v" + ov.snapshot;
+    renderKpis(ov.kpi);
+    renderPartChart(ov.partitions);
+    renderHistogram(hist);
+    renderPartTable(ov.partitions);
+    renderJobs(ov.jobs);
+    renderSnapshots(ov.snapshots);
+    renderQueries(ov.queries);
+  } finally {
+    main.classList.remove("fading");
+  }
+}
+
+/* ---------- 动作 ---------- */
+$("btnSimulate").onclick = async () => {
+  $("btnSimulate").disabled = true;
+  try {
+    const r = await api("/api/simulate", {
+      days: +$("simDays").value, corrupt_ratio: +$("simCorrupt").value / 100,
+    });
+    await refresh();
+    alert(`已重新模拟：${r.partitions} 分区 / ${r.files} 文件 / 损坏 ${r.corrupted_files}`);
+  } finally { $("btnSimulate").disabled = false; }
+};
+
+$("btnQuery").onclick = async () => {
+  const body = {
+    part_start: $("qPartStart").value || null,
+    part_end: $("qPartEnd").value || null,
+    key_min: $("qKeyMin").value === "" ? null : +$("qKeyMin").value,
+    key_max: $("qKeyMax").value === "" ? null : +$("qKeyMax").value,
+    strict: $("qStrict").checked,
+  };
+  const box = $("queryResult");
+  try {
+    const r = await api("/api/query", body);
+    box.textContent = "";
+    const stats = [
+      ["快照", "v" + r.snapshot], ["分区 命中/裁剪", `${r.partitions_hit} / ${r.partitions_pruned}`],
+      ["文件 命中/裁剪", `${r.files_hit} / ${r.files_pruned}`],
+      ["扫描字节", fmtBytes(r.bytes_scanned)], ["返回行数", r.rows_returned],
+      ["损坏文件", r.corrupt_files], ["耗时", r.duration_ms + " ms"],
+    ];
+    const grid = document.createElement("div"); grid.className = "kpis";
+    stats.forEach(([l, v]) => {
+      const d = document.createElement("div"); d.className = "kpi";
+      const a = document.createElement("div"); a.className = "label"; a.textContent = l;
+      const b = document.createElement("div");
+      b.className = "value" + (l === "损坏文件" && v > 0 ? " bad" : "");
+      b.style.fontSize = "18px"; b.textContent = v;
+      d.appendChild(a); d.appendChild(b); grid.appendChild(d);
+    });
+    box.appendChild(grid);
+  } catch (e) {
+    box.textContent = "";
+    const d = document.createElement("div"); d.className = "fail";
+    d.textContent = "查询失败：" + e.message; box.appendChild(d);
+  }
+  refresh();
+};
+
+$("btnMerge").onclick = async () => {
+  if (!SELECTED_PART) return;
+  const fa = $("failAt").value;
+  const body = { part_key: SELECTED_PART };
+  if (fa) { body.fail_at = fa; body.fail_attempts = [+ $("failAttempts").value]; }
+  const r = await api("/api/merge", body);
+  if (r.status === "NO_OP") alert("该分区无需治理 (NO_OP)");
+  setTimeout(refresh, 300);
+};
+
+$("btnCorrupt").onclick = async () => {
+  const r = await api("/api/corrupt", { part_key: SELECTED_PART, count: 1 });
+  alert("已损坏文件：" + r.corrupted.map(c => c.part_key + "/" +
+    c.path.split("/").pop()).join(", "));
+  refresh();
+};
+
+$("btnGc").onclick = async () => {
+  const r = await api("/api/gc", {});
+  $("gcResult").textContent =
+    `GC：清理墓碑文件 ${r.removed_tombstoned.length} 个，孤儿文件 ${r.removed_orphans.length} 个（阈值快照 v${r.threshold_snapshot}）`;
+  refresh();
+};
+
+$("btnVerifyConcurrent").onclick = async () => {
+  const box = $("verifyResult"); box.textContent = "运行中（合并 + 8 路并发查询）…";
+  const r = await api("/api/verify/concurrent", {});
+  box.textContent = "";
+  if (r.error) { box.textContent = r.error; return; }
+  const ok = r.consistent;
+  const div = document.createElement("div");
+  div.innerHTML =
+    `<p>${ok ? '<span class="ok">✓ 一致</span>' : '<span class="fail">✗ 不一致</span>'} ` +
+    `分区 ${r.part_key} · 策略 ${r.job_strategy} · 快照 v${r.snapshot_before}→v${r.snapshot_after} · ` +
+    `合并期间完成 ${r.total_reads} 次读取 · 行数 ${r.rows_before}→${r.rows_after} · ` +
+    `错误 ${r.errors.length} · 不一致读取 ${r.inconsistent_reads.length}</p>`;
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(r.reads_during_merge.slice(0, 12), null, 1);
+  div.appendChild(pre); box.appendChild(div);
+  refresh();
+};
+
+$("btnVerifyRetry").onclick = async () => {
+  const box = $("verifyResult"); box.textContent = "运行中（注入 commit 故障）…";
+  const r = await api("/api/verify/retry", {});
+  box.textContent = "";
+  if (r.error) { box.textContent = r.error; return; }
+  const ok = r.consistent;
+  const div = document.createElement("div");
+  div.innerHTML =
+    `<p>${ok ? '<span class="ok">✓ 通过</span>' : '<span class="fail">✗ 失败</span>'} ` +
+    `分区 ${r.part_key} · 重试任务 ${r.retry_job.status}（第 ${r.retry_job.attempts} 次成功）· ` +
+    `快照 v${r.retry_job.snapshot_before}→v${r.retry_job.snapshot_after} · ` +
+    `全失败时引用恢复：${r.rollback_check.references_restored ? "✓" : "✗"} · ` +
+    `GC 清理孤儿 ${r.gc.removed_orphans.length} 个</p>`;
+  const pre = document.createElement("pre");
+  pre.textContent = "重试历史: " + r.retry_job.history;
+  div.appendChild(pre); box.appendChild(div);
+  refresh();
+};
+
+/* ---------- 初始化 ---------- */
+(async () => {
+  // 若库为空则自动生成一份数据
+  const ov = await api("/api/overview");
+  if (ov.kpi.partitions === 0) await api("/api/simulate", {});
+  // 查询面板默认范围：最近 3 天
+  const today = new Date(), d3 = new Date(Date.now() - 2 * 864e5);
+  $("qPartStart").value = d3.toISOString().slice(0, 10);
+  $("qPartEnd").value = today.toISOString().slice(0, 10);
+  await refresh();
+  setInterval(refresh, 3000);
+})();
+</script>
+</body>
+</html>
